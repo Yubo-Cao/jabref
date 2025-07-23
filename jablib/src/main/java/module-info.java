@@ -106,6 +106,7 @@ open module org.jabref.jablib {
     exports org.jabref.logic.git;
     exports org.jabref.logic.pseudonymization;
     exports org.jabref.logic.citation.repository;
+    exports org.jabref.logic.command;
 
     requires java.base;
 
@@ -249,5 +250,6 @@ open module org.jabref.jablib {
     requires mslinks;
     requires org.antlr.antlr4.runtime;
     requires org.libreoffice.uno;
+    requires org.jetbrains.annotations;
     // endregion
 }

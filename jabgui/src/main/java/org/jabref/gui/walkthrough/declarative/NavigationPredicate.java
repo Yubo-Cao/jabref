@@ -23,6 +23,7 @@ import org.jabref.gui.frame.MainMenu;
 
 import com.sun.javafx.scene.control.ContextMenuContent;
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Defines a predicate for when navigation should occur on a target node.
@@ -162,23 +163,26 @@ public interface NavigationPredicate {
     ///    - The handler has timed out after HANDLER_TIMEOUT_MS milliseconds.
     ///    - A new window has been opened, or an existing window has been closed.
     ///
-    ///    Those conditions ensure that we will still navigate if original handler is blocking (e.g., showing a dialog,
-    ///    and we are highlighting a node in the dialog) and is still responsive (i.e., we will navigate after a certain
-    ///    amount of time, or a new window has been opened, and we can start polling the new window).
+    /// These conditions ensure that we will still navigate if original handler is
+    /// blocking (e.g., showing a dialog, and we are highlighting a node in the dialog)
+    /// and is still responsive (i.e., we will navigate after a certain amount of time,
+    /// or a new window has been opened, and we can start polling the new window).
     ///
-    /// @param <T> the type of the event
-    /// @param beforeNavigate a runnable to execute before navigation
+    /// @param <T>             the type of the event
+    /// @param beforeNavigate  a runnable to execute before navigation
     /// @param originalHandler the original event handler to execute
-    /// @param event the event to navigate
+    /// @param event           the event to navigate
     static <T extends Event> void navigate(
-            Runnable beforeNavigate,
-            EventHandler<? super T> originalHandler,
-            T event,
-            Runnable onNavigate) {
+            @NonNull Runnable beforeNavigate,
+            @Nullable EventHandler<? super T> originalHandler,
+            @NonNull T event,
+            @NonNull Runnable onNavigate) {
 
         event.consume();
         beforeNavigate.run();
 
+        // To allow running onNavigate immediately after the original handler,
+        // future is used more as a signal to indicate that the original handler has finished.
         CompletableFuture<Void> handlerFuture = new CompletableFuture<>();
 
         if (originalHandler != null) {

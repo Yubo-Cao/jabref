@@ -28,6 +28,7 @@ import org.jabref.logic.util.TaskExecutor;
 import org.jabref.model.database.BibDatabaseContext;
 import org.jabref.model.entry.BibEntry;
 import org.jabref.model.entry.BibEntryPreferences;
+import org.jabref.model.entry.field.SpecialField;
 import org.jabref.model.entry.field.StandardField;
 import org.jabref.model.groups.AbstractGroup;
 import org.jabref.model.groups.AllEntriesGroup;
@@ -45,6 +46,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -291,7 +293,66 @@ class GroupNodeViewModelTest {
         vm.ensureMatchedEntriesLoaded();
 
         // INCLUDING: automatic root sums direct matches and those of its children -> expect 2.
-        assertEquals(2, vm.getHits().getValue().intValue());
+        assertEquals(2, vm.getHits().get());
+    }
+
+    @Test
+    void automaticReadingStatusSubgroupsRefreshWhenEntryChanges() {
+        BibEntry firstEntry = new BibEntry().withField(SpecialField.READ_STATUS, "read");
+        BibEntry secondEntry = new BibEntry().withField(SpecialField.READ_STATUS, "read");
+        databaseContext.getDatabase().insertEntries(firstEntry, secondEntry);
+        GroupNodeViewModel vm = getViewModelForGroup(new AutomaticKeywordGroup(
+                "Read Status", GroupHierarchyType.INCLUDING, SpecialField.READ_STATUS, ',', '>'));
+        vm.ensureMatchedEntriesLoaded();
+
+        secondEntry.setField(SpecialField.READ_STATUS, "skimmed");
+        JavaFxExtension.awaitEvents();
+
+        assertEquals(List.of("read", "skimmed"), vm.getChildren().stream().map(GroupNodeViewModel::getDisplayName).toList());
+        vm.getChildren().forEach(GroupNodeViewModel::ensureMatchedEntriesLoaded);
+        assertEquals(List.of(1, 1), vm.getChildren().stream().map(child -> child.getHits().get()).toList());
+        assertEquals(2, vm.getHits().get());
+        assertEquals(List.of(firstEntry, secondEntry), vm.getGroupNode().findMatches(databaseContext.getDatabase()));
+
+        secondEntry.clearField(SpecialField.READ_STATUS);
+        JavaFxExtension.awaitEvents();
+
+        assertEquals(List.of("read"), vm.getChildren().stream().map(GroupNodeViewModel::getDisplayName).toList());
+        assertEquals(1, vm.getHits().get());
+        assertEquals(List.of(firstEntry), vm.getGroupNode().findMatches(databaseContext.getDatabase()));
+    }
+
+    @Test
+    void automaticSubgroupsPreserveExistingNestedGroupsWhenKeywordsChange() {
+        GroupNodeViewModel vm = getViewModelForGroup(new AutomaticKeywordGroup(
+                "Keywords", GroupHierarchyType.INCLUDING, StandardField.KEYWORDS, ',', '>'));
+        vm.ensureMatchedEntriesLoaded();
+        BibEntry entry = new BibEntry().withField(StandardField.KEYWORDS, "A > B, A > C");
+        databaseContext.getDatabase().insertEntry(entry);
+        JavaFxExtension.awaitEvents();
+        GroupNodeViewModel groupA = vm.getChildren().getFirst();
+        groupA.ensureMatchedEntriesLoaded();
+        stateManager.getSelectedGroups(databaseContext).add(groupA.getGroupNode());
+        groupA.expandedProperty().set(true);
+        assertEquals(1, vm.getHits().get());
+
+        entry.setField(StandardField.KEYWORDS, "A > D");
+        JavaFxExtension.awaitEvents();
+
+        assertSame(groupA, vm.getChildren().getFirst());
+        assertTrue(groupA.expandedProperty().get());
+        assertEquals(List.of(groupA.getGroupNode()), stateManager.getSelectedGroups(databaseContext));
+        assertEquals(List.of("D"), groupA.getChildren().stream().map(GroupNodeViewModel::getDisplayName).toList());
+        assertEquals(1, groupA.getHits().get());
+        assertEquals(1, vm.getHits().get());
+        assertEquals(List.of(entry), vm.getGroupNode().findMatches(databaseContext.getDatabase()));
+
+        databaseContext.getDatabase().removeEntry(entry);
+        JavaFxExtension.awaitEvents();
+
+        assertEquals(List.of(), vm.getChildren());
+        assertEquals(0, vm.getHits().get());
+        assertEquals(List.of(), vm.getGroupNode().findMatches(databaseContext.getDatabase()));
     }
 
     @Test
@@ -332,7 +393,7 @@ class GroupNodeViewModelTest {
         vm.ensureMatchedEntriesLoaded();
 
         // INDEPENDENT: automatic root has no direct matches -> expect 0.
-        assertEquals(0, vm.getHits().getValue().intValue());
+        assertEquals(0, vm.getHits().get());
     }
 
     @Test
@@ -341,17 +402,17 @@ class GroupNodeViewModelTest {
         GroupNodeViewModel vm = getViewModelForGroup(
                 new WordKeywordGroup("Test group", GroupHierarchyType.INDEPENDENT, StandardField.TITLE, "search", true, ',', false));
         vm.ensureMatchedEntriesLoaded();
-        assertEquals(1, vm.getHits().getValue().intValue());
+        assertEquals(1, vm.getHits().get());
 
         // A refresh arriving while counts are disabled is skipped, but must invalidate the cache
         preferences.getGroupsPreferences().setDisplayGroupCount(false);
         vm.updateMatchedEntries();
-        assertEquals(0, vm.getHits().getValue().intValue());
+        assertEquals(0, vm.getHits().get());
 
         // Re-enabling counts (what GroupTreeView's number cell does) recomputes instead of showing the stale cache
         preferences.getGroupsPreferences().setDisplayGroupCount(true);
         vm.ensureMatchedEntriesLoaded();
-        assertEquals(1, vm.getHits().getValue().intValue());
+        assertEquals(1, vm.getHits().get());
     }
 
     @Test
@@ -368,12 +429,12 @@ class GroupNodeViewModelTest {
         databaseContext.getDatabase().insertEntries(List.of(new BibEntry(), new BibEntry()));
         allEntriesViewModel.ensureMatchedEntriesLoaded();
 
-        assertEquals(2, allEntriesViewModel.getHits().getValue().intValue());
+        assertEquals(2, allEntriesViewModel.getHits().get());
         verify(recordingTaskExecutor, never()).schedule(any(BackgroundTask.class), anyLong(), any(TimeUnit.class));
 
         databaseContext.getDatabase().insertEntry(new BibEntry());
 
-        assertEquals(3, allEntriesViewModel.getHits().getValue().intValue());
+        assertEquals(3, allEntriesViewModel.getHits().get());
     }
 
     @Test
@@ -385,11 +446,11 @@ class GroupNodeViewModelTest {
         GroupNodeViewModel vm = getViewModelForGroup(
                 new WordKeywordGroup("Test group", GroupHierarchyType.INDEPENDENT, StandardField.TITLE, "search", true, ',', false));
         vm.ensureMatchedEntriesLoaded();
-        assertEquals(2, vm.getHits().getValue().intValue());
+        assertEquals(2, vm.getHits().get());
 
         databaseContext.getDatabase().removeEntry(firstEntry);
 
-        assertEquals(1, vm.getHits().getValue().intValue());
+        assertEquals(1, vm.getHits().get());
     }
 
     @Test
@@ -402,11 +463,11 @@ class GroupNodeViewModelTest {
         databaseContext.getDatabase().insertEntry(remainingEntry);
 
         viewModel.ensureMatchedEntriesLoaded();
-        assertEquals(12, viewModel.getHits().getValue().intValue());
+        assertEquals(12, viewModel.getHits().get());
 
         databaseContext.getDatabase().removeEntries(entriesToRemove);
 
-        assertEquals(1, viewModel.getHits().getValue().intValue());
+        assertEquals(1, viewModel.getHits().get());
     }
 
     @Test
@@ -467,7 +528,7 @@ class GroupNodeViewModelTest {
         GroupNodeViewModel parentVm = getViewModelForGroup(parentNode);
         parentVm.ensureMatchedEntriesLoaded();
 
-        assertEquals(2, parentVm.getHits().getValue().intValue());
+        assertEquals(2, parentVm.getHits().get());
     }
 
     @Test
@@ -502,6 +563,6 @@ class GroupNodeViewModelTest {
         BibEntry entry = new BibEntry().withField(StandardField.AUTHOR, "Alice");
         databaseContext.getDatabase().postEvent(new IndexAddedOrUpdatedEvent(List.of(entry)));
 
-        assertEquals(0, searchVm.getHits().getValue().intValue());
+        assertEquals(0, searchVm.getHits().get());
     }
 }

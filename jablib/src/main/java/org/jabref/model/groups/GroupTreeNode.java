@@ -104,6 +104,9 @@ public class GroupTreeNode extends TreeNode<GroupTreeNode> {
         if (context == GroupHierarchyType.INDEPENDENT) {
             return getGroup();
         }
+        if (getGroup() instanceof AutomaticGroup) {
+            return entry -> matches(entry, originalContext, new IdentityHashMap<>());
+        }
         MatcherSet searchRule = MatcherSets.build(
                 context == GroupHierarchyType.REFINING ? MatcherSets.MatcherType.AND : MatcherSets.MatcherType.OR);
         searchRule.addRule(getGroup());
@@ -275,7 +278,9 @@ public class GroupTreeNode extends TreeNode<GroupTreeNode> {
         GroupHierarchyType context = getGroup().getHierarchicalContext();
         boolean matches = getGroup().contains(entry);
         if ((context == GroupHierarchyType.INCLUDING) && !matches && (originalContext != GroupHierarchyType.REFINING)) {
-            List<GroupTreeNode> children = getChildrenInternal();
+            List<GroupTreeNode> children = getGroup() instanceof AutomaticGroup automaticGroup
+                                           ? new ArrayList<>(automaticGroup.createSubgroups(entry))
+                                           : getChildrenInternal();
             for (int i = 0; i < children.size(); i++) {
                 if (children.get(i).matches(entry, originalContext, cache)) {
                     matches = true;

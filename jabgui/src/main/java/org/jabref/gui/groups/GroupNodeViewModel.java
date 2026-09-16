@@ -2,8 +2,11 @@ package org.jabref.gui.groups;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Future;
@@ -109,6 +112,10 @@ public class GroupNodeViewModel {
     private final List<Future<?>> searchIndexFutures = Collections.synchronizedList(new ArrayList<>());
     private @Nullable BackgroundTask<List<BibEntry>> currentUpdateTask;
     private @Nullable Future<?> currentUpdateFuture;
+    private @Nullable BackgroundTask<ObservableList<GroupTreeNode>> currentSubgroupsTask;
+    private @Nullable Future<?> currentSubgroupsFuture;
+    private Optional<GroupNodeViewModel> parentViewModel = Optional.empty();
+    private boolean subgroupsUpdatePending;
     private boolean matchedEntriesInitialized;
     private boolean matchedEntriesUpdateInProgress;
     private boolean matchedEntriesUpdatePending;
@@ -178,7 +185,9 @@ public class GroupNodeViewModel {
     }
 
     private GroupNodeViewModel toViewModel(GroupTreeNode child) {
-        return new GroupNodeViewModel(databaseContext, stateManager, taskExecutor, child, localDragBoard, preferences);
+        GroupNodeViewModel childViewModel = new GroupNodeViewModel(databaseContext, stateManager, taskExecutor, child, localDragBoard, preferences);
+        childViewModel.parentViewModel = Optional.of(this);
+        return childViewModel;
     }
 
     /// @return what the assignment changed, for the caller to record — this does not touch the
@@ -305,6 +314,14 @@ public class GroupNodeViewModel {
         }
 
         disposed = true;
+        if (currentSubgroupsTask != null) {
+            currentSubgroupsTask.cancel(true);
+            currentSubgroupsTask = null;
+        }
+        if (currentSubgroupsFuture != null) {
+            currentSubgroupsFuture.cancel(true);
+            currentSubgroupsFuture = null;
+        }
         if (currentUpdateTask != null) {
             currentUpdateTask.cancel(true);
             currentUpdateTask = null;
@@ -332,6 +349,18 @@ public class GroupNodeViewModel {
     ///
     /// @implNote Search groups are updated in [SearchIndexListener].
     private void onDatabaseChanged(ListChangeListener.Change<? extends BibEntry> change) {
+        if (disposed) {
+            return;
+        }
+        if (groupNode.getGroup() instanceof AutomaticGroup automaticGroup) {
+            while (change.next()) {
+                if (!change.wasPermutated()) {
+                    UiTaskExecutor.runInJavaFXThread(() -> updateAutomaticSubgroups(automaticGroup));
+                    break;
+                }
+            }
+            return;
+        }
         if (isAllEntriesGroup()) {
             updateMatchedEntries();
             return;
@@ -350,7 +379,7 @@ public class GroupNodeViewModel {
                 // Nothing to do, as permutation doesn't change matched entries
             } else if (change.wasUpdated()) {
                 for (BibEntry changedEntry : change.getList().subList(change.getFrom(), change.getTo())) {
-                    if (isMatchEffective(this, changedEntry)) {
+                    if (groupNode.matches(changedEntry)) {
                         // ADR-0038
                         addMatchedEntry(changedEntry.getId());
                     } else {
@@ -364,13 +393,86 @@ public class GroupNodeViewModel {
                     removeMatchedEntry(removedEntry.getId());
                 }
                 for (BibEntry addedEntry : change.getAddedSubList()) {
-                    if (isMatchEffective(this, addedEntry)) {
+                    if (groupNode.matches(addedEntry)) {
                         // ADR-0038
                         addMatchedEntry(addedEntry.getId());
                     }
                 }
             }
         }
+    }
+
+    private void updateAutomaticSubgroups(AutomaticGroup automaticGroup) {
+        if (disposed) {
+            return;
+        }
+        if (currentSubgroupsTask != null) {
+            subgroupsUpdatePending = true;
+            return;
+        }
+
+        BackgroundTask<ObservableList<GroupTreeNode>> task = BackgroundTask
+                .wrap(() -> automaticGroup.createSubgroups(FXCollections.observableArrayList(databaseContext.getDatabase().getEntriesSnapshot())))
+                .onSuccess(subgroups -> {
+                    if (!disposed && !subgroupsUpdatePending) {
+                        synchronizeSubgroups(subgroups);
+                        refreshGroupAndAncestors();
+                    }
+                    completeSubgroupsUpdate(automaticGroup);
+                })
+                .onFailure(exception -> {
+                    LOGGER.warn("Could not update automatic subgroups for group {}", groupNode.getName(), exception);
+                    completeSubgroupsUpdate(automaticGroup);
+                });
+        currentSubgroupsTask = task;
+        currentSubgroupsFuture = taskExecutor.schedule(task, 0, TimeUnit.MILLISECONDS);
+    }
+
+    private void completeSubgroupsUpdate(AutomaticGroup automaticGroup) {
+        currentSubgroupsTask = null;
+        currentSubgroupsFuture = null;
+        if (subgroupsUpdatePending) {
+            subgroupsUpdatePending = false;
+            updateAutomaticSubgroups(automaticGroup);
+        }
+    }
+
+    private void synchronizeSubgroups(List<GroupTreeNode> subgroups) {
+        Map<AbstractGroup, GroupTreeNode> remainingSubgroups = new HashMap<>();
+        subgroups.forEach(subgroup -> remainingSubgroups.put(subgroup.getGroup(), subgroup));
+        for (GroupNodeViewModel child : List.copyOf(children)) {
+            GroupTreeNode subgroup = remainingSubgroups.remove(child.groupNode.getGroup());
+            if (subgroup != null) {
+                if (!child.groupNode.getChildren().equals(subgroup.getChildren())) {
+                    child.synchronizeSubgroups(subgroup.getChildren());
+                    child.refreshGroup();
+                }
+            } else {
+                child.dispose();
+                if (groupNode.getGroup() instanceof AutomaticGroup) {
+                    children.remove(child);
+                } else {
+                    child.groupNode.removeFromParent();
+                }
+            }
+        }
+        for (GroupTreeNode subgroup : List.copyOf(subgroups)) {
+            if (remainingSubgroups.containsKey(subgroup.getGroup())) {
+                if (groupNode.getGroup() instanceof AutomaticGroup) {
+                    children.add(toViewModel(subgroup));
+                } else {
+                    subgroup.moveTo(groupNode);
+                }
+            }
+        }
+        if (groupNode.getGroup() instanceof AutomaticGroup) {
+            FXCollections.sort(children, Comparator.comparing(GroupNodeViewModel::getDisplayName, String.CASE_INSENSITIVE_ORDER));
+        }
+    }
+
+    private void refreshGroupAndAncestors() {
+        refreshGroup();
+        parentViewModel.ifPresent(GroupNodeViewModel::refreshGroupAndAncestors);
     }
 
     private void refreshGroup() {
@@ -420,7 +522,7 @@ public class GroupNodeViewModel {
                         if (disposed || Thread.currentThread().isInterrupted()) {
                             return List.<BibEntry>of();
                         }
-                        if (isMatchEffective(this, entry)) {
+                        if (groupNode.matches(entry)) {
                             matched.add(entry);
                         }
                     }
@@ -783,53 +885,6 @@ public class GroupNodeViewModel {
         };
     }
 
-    /// Returns whether the given entry should be considered part of this group
-    /// for the purpose of the groups sidebar (hit counter, highlighting, etc.).
-    ///
-    /// We cannot simply use groupNode.matches(entry) here. That only checks
-    /// the rule of this single group and ignores the configured hierarchy type and
-    /// any child groups created in the view model (for example automatic subgroups)
-    ///
-    /// This method applies the hierarchy type:
-    /// INDEPENDENT: match this group only,
-    /// INCLUDING: match this group or any child group,
-    /// REFINING: match this group and all ancestor groups.
-    private boolean isMatchEffective(GroupNodeViewModel vm, BibEntry entry) {
-        GroupTreeNode node = vm.groupNode;
-        return switch (node.getGroup().getHierarchicalContext()) {
-            case INDEPENDENT ->
-                    node.matches(entry);
-
-            case INCLUDING -> {
-                if (node.getGroup().contains(entry)) {
-                    yield true;
-                }
-                boolean matched = false;
-                for (GroupNodeViewModel childVm : vm.children) {
-                    if (isMatchEffective(childVm, entry)) {
-                        matched = true;
-                        break;
-                    }
-                }
-                yield matched;
-            }
-
-            case REFINING -> {
-                if (!node.matches(entry)) {
-                    yield false;
-                }
-                Optional<GroupTreeNode> parent = node.getParent();
-                while (parent.isPresent()) {
-                    if (!parent.get().matches(entry)) {
-                        yield false;
-                    }
-                    parent = parent.get().getParent();
-                }
-                yield true;
-            }
-        };
-    }
-
     class SearchIndexListener {
         @Subscribe
         public void listen(IndexStartedEvent event) {
@@ -868,7 +923,7 @@ public class GroupNodeViewModel {
                         return;
                     }
                     for (BibEntry entry : event.entries()) {
-                        if (GroupNodeViewModel.this.isMatchEffective(GroupNodeViewModel.this, entry)) {
+                        if (groupNode.matches(entry)) {
                             addMatchedEntry(entry.getId());
                         } else {
                             removeMatchedEntry(entry.getId());

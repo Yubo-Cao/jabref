@@ -114,7 +114,7 @@ public class GroupNodeViewModel {
     private @Nullable Future<?> currentUpdateFuture;
     private @Nullable BackgroundTask<ObservableList<GroupTreeNode>> currentSubgroupsTask;
     private @Nullable Future<?> currentSubgroupsFuture;
-    private Optional<GroupNodeViewModel> parentViewModel = Optional.empty();
+    private @Nullable GroupNodeViewModel parentViewModel;
     private boolean subgroupsUpdatePending;
     private boolean matchedEntriesInitialized;
     private boolean matchedEntriesUpdateInProgress;
@@ -186,7 +186,7 @@ public class GroupNodeViewModel {
 
     private GroupNodeViewModel toViewModel(GroupTreeNode child) {
         GroupNodeViewModel childViewModel = new GroupNodeViewModel(databaseContext, stateManager, taskExecutor, child, localDragBoard, preferences);
-        childViewModel.parentViewModel = Optional.of(this);
+        childViewModel.parentViewModel = this;
         return childViewModel;
     }
 
@@ -472,7 +472,7 @@ public class GroupNodeViewModel {
 
     private void refreshGroupAndAncestors() {
         refreshGroup();
-        parentViewModel.ifPresent(GroupNodeViewModel::refreshGroupAndAncestors);
+        Optional.ofNullable(parentViewModel).ifPresent(GroupNodeViewModel::refreshGroupAndAncestors);
     }
 
     private void refreshGroup() {
